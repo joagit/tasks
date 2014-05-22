@@ -7,10 +7,8 @@
 #define LONGBUTTONPRESS 1
 #define UNDEFINEDBUTTONPRESS 2
 
-byte button[] = {BTNLEFT, BTNRIGHT, BTNCENTER};
 int lcd_x[] = {XL, XR, XC};
-bool active_button_event[] = {false, false, false};
-bool button_press_detected[] = {false, false, false};
+bool active_button_event[3];
 byte button_press_type[3];
 mutex buttonStateMutex;
 
@@ -25,12 +23,16 @@ void ResetButtonCounts(const byte & btn)
 
 task button_handler()
 {
+  byte button[] = {BTNLEFT, BTNRIGHT, BTNCENTER};
+  bool button_press_detected[3];
   int btn;
+  
   for (int n=0; n<3; n++)
   {
     btn = button[n];
     ResetButtonCounts(btn);
-  }
+    button_press_detected[n] = false;
+  }  
   while (true)
   {
     for (int n=0; n<3; n++)
@@ -76,41 +78,64 @@ void clear_data_line(const byte & line)
   TextOut(XR, line, blank);
 }
 
-task main() {
-  int line;
+void init_button_event_handling()
+{
   ClearScreen();
   TextOut(XL, LCD_LINE1, "Left");
   TextOut(XC, LCD_LINE1, "Cntr");
   TextOut(XR, LCD_LINE1, "Rght");
-  for (int n=0; n<3; n++) 
-  {
-    ResetButtonCounts(button[n]);
-  }
-  
-  while(true)
-  {
-    clear_data_line(LCD_LINE2);
-    clear_data_line(LCD_LINE3);
-    clear_data_line(LCD_LINE4);
-    clear_data_line(LCD_LINE5);
-    clear_data_line(LCD_LINE6);
-    clear_data_line(LCD_LINE7);
-    clear_data_line(LCD_LINE8);
+}
 
+task button_event_handler()
+{
+  init_button_event_handling();
+  while (true)
+  {
+    clear_data_line(LCD_LINE3);
     for (int n=0; n<3; n++)
     {
-      byte btn = button[n];
-      if (ButtonPressed(btn,false))
+      if (active_button_event[n])
       {
-        TextOut(lcd_x[n], LCD_LINE2, "xxx");
+        if (button_press_type[n] == SHORTBUTTONPRESS)
+        {
+          TextOut(lcd_x[n], LCD_LINE3, "Short", false);
+        }
+        else if (button_press_type[n] == LONGBUTTONPRESS)
+        {
+          TextOut(lcd_x[n], LCD_LINE3, "Long", false);
+        }
+        else if (button_press_type[n] == UNDEFINEDBUTTONPRESS)
+        {
+          TextOut(lcd_x[n], LCD_LINE3, "Undef", false);
+        }
+        else
+        {
+          TextOut(lcd_x[n], LCD_LINE3, "????", false);
+        }
+        Wait(2000);
+        Acquire(buttonStateMutex);
+        button_press_type[n] = UNDEFINEDBUTTONPRESS;
+        active_button_event[n] = false;
+        Release(buttonStateMutex);        
       }
-      NumOut(lcd_x[n], LCD_LINE3, ButtonPressCount(btn));
-      NumOut(lcd_x[n], LCD_LINE4, ButtonLongPressCount(btn));
-      NumOut(lcd_x[n], LCD_LINE6, ButtonReleaseCount(btn));
-      NumOut(lcd_x[n], LCD_LINE7, ButtonShortReleaseCount(btn));
-      NumOut(lcd_x[n], LCD_LINE8, ButtonLongReleaseCount(btn));
     }
-    Wait(10);
   }
+}
+
+void init_button_event_communication()
+{
+  Acquire(buttonStateMutex);
+  for (int n=0; n<3; n++)
+  {
+    active_button_event[n] = false;
+    button_press_type[n] = UNDEFINEDBUTTONPRESS;
+  }
+  Release(buttonStateMutex);
+}
+
+task main()
+{
+  Precedes(button_handler, button_event_handler);
+  init_button_event_communication();
 }
 
