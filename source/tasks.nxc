@@ -1,21 +1,18 @@
 #define CHAR_WIDTH 6
-
-string display_msg;
-bool button_pressed_before[] = {false, false, false};
-byte button[] = {BTNLEFT, BTNRIGHT, BTNCENTER};
-byte button_state[3];
-
 #define XL 2*CHAR_WIDTH
 #define XC 7*CHAR_WIDTH
 #define XR 12*CHAR_WIDTH
 
-void clear_data_line(const byte & line)
-{
-  string blank = "     ";
-  TextOut(XL, line, blank);
-  TextOut(XC, line, blank);
-  TextOut(XR, line, blank);
-}
+#define SHORTBUTTONPRESS 0
+#define LONGBUTTONPRESS 1
+#define UNDEFINEDBUTTONPRESS 2
+
+byte button[] = {BTNLEFT, BTNRIGHT, BTNCENTER};
+int lcd_x[] = {XL, XR, XC};
+bool active_button_event[] = {false, false, false};
+bool button_press_detected[] = {false, false, false};
+byte button_press_type[3];
+mutex buttonStateMutex;
 
 void ResetButtonCounts(const byte & btn)
 {
@@ -26,14 +23,69 @@ void ResetButtonCounts(const byte & btn)
   SetButtonReleaseCount(btn,0);
 }
 
+task button_handler()
+{
+  int btn;
+  for (int n=0; n<3; n++)
+  {
+    btn = button[n];
+    ResetButtonCounts(btn);
+  }
+  while (true)
+  {
+    for (int n=0; n<3; n++)
+    {
+      if (!active_button_event[n])
+      {
+        btn = button[n];
+        if (ButtonPressed(btn,false) && !button_press_detected[n])
+        {
+          button_press_detected[n] = true;
+        }
+        if (button_press_detected[n] && !ButtonPressed(btn,false))
+        {
+          Acquire(buttonStateMutex);
+          if (ButtonLongReleaseCount(btn)>0)
+          {
+            button_press_type[n] = LONGBUTTONPRESS;
+          }
+          else if (ButtonShortReleaseCount(btn)>0)
+          {
+            button_press_type[n] = SHORTBUTTONPRESS;
+          }
+          else
+          {
+            button_press_type[n] = UNDEFINEDBUTTONPRESS;
+          }
+          active_button_event[n]=true;
+          Release(buttonStateMutex);
+          button_press_detected[n] = false;
+          ResetButtonCounts(btn);
+        }
+      }
+    }
+    Wait(10);
+  }
+}
+
+void clear_data_line(const byte & line)
+{
+  string blank = "     ";
+  TextOut(XL, line, blank);
+  TextOut(XC, line, blank);
+  TextOut(XR, line, blank);
+}
+
 task main() {
+  int line;
   ClearScreen();
   TextOut(XL, LCD_LINE1, "Left");
   TextOut(XC, LCD_LINE1, "Cntr");
   TextOut(XR, LCD_LINE1, "Rght");
-  ResetButtonCounts(BTNLEFT);
-  ResetButtonCounts(BTNCENTER);
-  ResetButtonCounts(BTNRIGHT);
+  for (int n=0; n<3; n++) 
+  {
+    ResetButtonCounts(button[n]);
+  }
   
   while(true)
   {
@@ -45,33 +97,19 @@ task main() {
     clear_data_line(LCD_LINE7);
     clear_data_line(LCD_LINE8);
 
-    if (ButtonPressed(BTNLEFT,false)) { TextOut(XL, LCD_LINE2, "xxx"); }
-    if (ButtonPressed(BTNCENTER,false)) { TextOut(XC, LCD_LINE2, "xxx"); }
-    if (ButtonPressed(BTNRIGHT,false)) { TextOut(XR, LCD_LINE2, "xxx"); }
-    
-    int line = LCD_LINE3;
-    NumOut(XL, line, ButtonPressCount(BTNLEFT));
-    NumOut(XC, line, ButtonPressCount(BTNCENTER));
-    NumOut(XR, line, ButtonPressCount(BTNRIGHT));
-    line = LCD_LINE4;
-    NumOut(XL, line, ButtonLongPressCount(BTNLEFT));
-    NumOut(XC, line, ButtonLongPressCount(BTNCENTER));
-    NumOut(XR, line, ButtonLongPressCount(BTNRIGHT));
-
-    line = LCD_LINE6;
-    NumOut(XL, line, ButtonReleaseCount(BTNLEFT));
-    NumOut(XC, line, ButtonReleaseCount(BTNCENTER));
-    NumOut(XR, line, ButtonReleaseCount(BTNRIGHT));
-    line = LCD_LINE7;
-    NumOut(XL, line, ButtonShortReleaseCount(BTNLEFT));
-    NumOut(XC, line, ButtonShortReleaseCount(BTNCENTER));
-    NumOut(XR, line, ButtonShortReleaseCount(BTNRIGHT));
-    line = LCD_LINE8;
-    NumOut(XL, line, ButtonLongReleaseCount(BTNLEFT));
-    NumOut(XC, line, ButtonLongReleaseCount(BTNCENTER));
-    NumOut(XR, line, ButtonLongReleaseCount(BTNRIGHT));
-
-
+    for (int n=0; n<3; n++)
+    {
+      byte btn = button[n];
+      if (ButtonPressed(btn,false))
+      {
+        TextOut(lcd_x[n], LCD_LINE2, "xxx");
+      }
+      NumOut(lcd_x[n], LCD_LINE3, ButtonPressCount(btn));
+      NumOut(lcd_x[n], LCD_LINE4, ButtonLongPressCount(btn));
+      NumOut(lcd_x[n], LCD_LINE6, ButtonReleaseCount(btn));
+      NumOut(lcd_x[n], LCD_LINE7, ButtonShortReleaseCount(btn));
+      NumOut(lcd_x[n], LCD_LINE8, ButtonLongReleaseCount(btn));
+    }
     Wait(10);
   }
 }
