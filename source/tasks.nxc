@@ -1,18 +1,43 @@
+/* setup for LCD handling */
 #define CHAR_WIDTH 6
 #define XL 2*CHAR_WIDTH
 #define XC 7*CHAR_WIDTH
 #define XR 12*CHAR_WIDTH
+const byte lcd_x[] = {XL, XR, XC};
 
+/* setup for button event handling */
 #define SHORTBUTTONPRESS 0
 #define LONGBUTTONPRESS 1
 #define UNDEFINEDBUTTONPRESS 2
-
-int lcd_x[] = {XL, XR, XC};
+#define LEFT_BUTTON 0
+#define RIGHT_BUTTON 1
+#define CENTER_BUTTON 2
 bool active_button_event[3];
 byte button_press_type[3];
 mutex buttonStateMutex;
 
-void ResetButtonCounts(const byte & btn)
+/* setup for motor control */
+#define TURNTABLE 0
+#define COLOR_SENSOR_ARM 1
+#define GRABBER 2
+#define GRAB_POSITION -145
+#define FLIP_POSITION -235
+const byte motor_port[] = {OUT_A, OUT_B, OUT_C};
+const float motor_gear_factor[] = {3.0, 1.0, 1.0};
+const byte motor_max_pwr[] = {100, 30, 30};
+const float motor_KP[] = {1500, 1000, 1000};
+const float motor_KI[] = {10, 0, 0};
+const float motor_KD[] = {37500, 0, 0};
+const float motor_PID_damper[] = {0.8, 1.0, 1.0};
+int motor_target[3];
+int motor_position[3];
+bool motor_control_activated[3];
+int motor_curr_err[3];
+int motor_prev_err[3];
+mutex motorMutex;
+
+
+void reset_button_counts(const byte & btn)
 {
   SetButtonPressCount(btn,0);
   SetButtonLongPressCount(btn,0);
@@ -25,21 +50,20 @@ task button_handler()
 {
   byte button[] = {BTNLEFT, BTNRIGHT, BTNCENTER};
   bool button_press_detected[3];
-  int btn;
   
-  for (int n=0; n<3; n++)
+  for (byte n=0; n<3; n++)
   {
-    btn = button[n];
-    ResetButtonCounts(btn);
+    int btn = button[n];
+    reset_button_counts(btn);
     button_press_detected[n] = false;
   }  
   while (true)
   {
-    for (int n=0; n<3; n++)
+    for (byte n=0; n<3; n++)
     {
       if (!active_button_event[n])
       {
-        btn = button[n];
+        byte btn = button[n];
         if (ButtonPressed(btn,false) && !button_press_detected[n])
         {
           button_press_detected[n] = true;
@@ -62,7 +86,7 @@ task button_handler()
           active_button_event[n]=true;
           Release(buttonStateMutex);
           button_press_detected[n] = false;
-          ResetButtonCounts(btn);
+          reset_button_counts(btn);
         }
       }
     }
@@ -77,6 +101,131 @@ void clear_data_line(const byte & line)
   TextOut(XC, line, blank);
   TextOut(XR, line, blank);
 }
+void init_lcd_display()
+{
+  ClearScreen();
+  TextOut(0,LCD_LINE1,"  Mtr1 Mtr2 Mtr3");
+  TextOut(0,LCD_LINE2,"C");
+  TextOut(0,LCD_LINE3,"T");
+  TextOut(0,LCD_LINE4,"E");
+  TextOut(0,LCD_LINE5,"A");
+}
+
+string align_right(int val,unsigned int str_len)
+{
+  string retval = StrCat("                ", NumToStr(val));
+  return RightStr(retval, str_len);
+}
+
+task lcd_display_handler()
+{
+  init_lcd_display();
+  while (true)
+  {
+    for (int n=0; n<3; n++)
+    {
+      int offset = (1+n*5)*CHAR_WIDTH;
+      TextOut(offset,LCD_LINE2,align_right(motor_position[n],4));
+      TextOut(offset,LCD_LINE3,align_right(motor_target[n],4));
+      TextOut(offset,LCD_LINE4,align_right(motor_curr_err[n],4));
+      if (motor_control_activated[n])
+      {
+        TextOut(offset,LCD_LINE5," Yes");
+      }
+      else
+      {
+        TextOut(offset,LCD_LINE5," No ");
+      }
+    }
+    Wait(10);
+  }
+}
+
+task motor_controller()
+{  
+  float PID_integral[] = {0.0, 0.0, 0.0};
+  unsigned long lastTick[3];
+  for (byte n=0; n<3 ; n++ ) { lastTick[n] = CurrentTick(); }
+  
+  while (true)
+  {
+    for (byte n=0; n<3; n++ )
+    {
+      byte port = motor_port[n];
+      long current_position = MotorRotationCount(port);
+      motor_position[n] = current_position;
+      unsigned long dt = CurrentTick() - lastTick[n];
+      if (dt > 0)
+      {
+        long err = motor_target[n]-current_position;
+        motor_curr_err[n] = err;
+        if (motor_control_activated[n])
+        {
+          bool reverse;
+          PID_integral[n] = motor_PID_damper[n] * PID_integral[n] + err*dt ;
+          int pwr = ( motor_KP[n] * err 
+                     + motor_KI[n] * PID_integral[n] 
+                     + motor_KD[n] * ( err - motor_prev_err[n]) /dt ) / 100;
+          if ( pwr < 0 ) { reverse = true; pwr = -pwr; } else { reverse = false; }
+          if ( pwr>motor_max_pwr[n] ) { pwr = motor_max_pwr[n]; }
+          if ( reverse ) { OnRev(n,pwr); } else { OnFwd(n,pwr); }
+        }
+        motor_prev_err[n] = err;
+      }
+      lastTick[n] += dt;
+    }
+  }
+}
+
+void move_motor_to(byte n, int degrees)
+{
+  Acquire(motorMutex);
+  motor_target[n] = degrees * motor_gear_factor[n];
+  motor_control_activated[n] = true;
+  Release(motorMutex);
+}
+
+void turn_table_to(int degrees)
+{
+  move_motor_to(TURNTABLE, degrees);
+}
+
+void turn_off_all_motors()
+{
+  Acquire(motorMutex);
+  for ( int n=0; n<3; n++ )
+  {
+    motor_control_activated[n] = false;
+    byte port = motor_port[n];
+    Off(port);
+  }
+  Release(motorMutex);
+}
+
+void grab_cube()
+{
+  move_motor_to(GRABBER,GRAB_POSITION);
+}
+
+void release_cube()
+{
+  move_motor_to(GRABBER,0);
+}
+
+void flip_cube()
+{
+  move_motor_to(GRABBER,FLIP_POSITION);
+}
+
+task motor_director()
+{
+  Wait(500);
+  //turn_table(180);
+  grab_cube(); Wait(2000);
+  release_cube(); Wait(2000);
+  turn_off_all_motors();
+}
+
 
 void init_button_event_handling()
 {
@@ -86,23 +235,40 @@ void init_button_event_handling()
   TextOut(XR, LCD_LINE1, "Rght");
 }
 
+void handle_buttonpress_event(byte btn, int btn_press_type)
+{
+  if ( btn == LEFT_BUTTON )
+  {
+    grab_cube();
+  }
+  else if ( btn == RIGHT_BUTTON )
+  {
+    flip_cube();
+  }
+  else if ( btn == CENTER_BUTTON )
+  {
+    release_cube();
+  }
+}
+
 task button_event_handler()
 {
-  init_button_event_handling();
+  init_button_event_handling();  
   while (true)
   {
-    clear_data_line(LCD_LINE3);
-    for (int n=0; n<3; n++)
+    for (byte n=0; n<3; n++)
     {
       if (active_button_event[n])
       {
         if (button_press_type[n] == SHORTBUTTONPRESS)
         {
           TextOut(lcd_x[n], LCD_LINE3, "Short", false);
+          handle_buttonpress_event(n, button_press_type[n]);
         }
         else if (button_press_type[n] == LONGBUTTONPRESS)
         {
-          TextOut(lcd_x[n], LCD_LINE3, "Long", false);
+          TextOut(lcd_x[n], LCD_LINE3, " Long", false);
+          handle_buttonpress_event(n, button_press_type[n]);
         }
         else if (button_press_type[n] == UNDEFINEDBUTTONPRESS)
         {
@@ -112,7 +278,6 @@ task button_event_handler()
         {
           TextOut(lcd_x[n], LCD_LINE3, "????", false);
         }
-        Wait(2000);
         Acquire(buttonStateMutex);
         button_press_type[n] = UNDEFINEDBUTTONPRESS;
         active_button_event[n] = false;
@@ -122,8 +287,9 @@ task button_event_handler()
   }
 }
 
-void init_button_event_communication()
+void init_inter_task_communication()
 {
+  // variables for button event communications
   Acquire(buttonStateMutex);
   for (int n=0; n<3; n++)
   {
@@ -131,11 +297,24 @@ void init_button_event_communication()
     button_press_type[n] = UNDEFINEDBUTTONPRESS;
   }
   Release(buttonStateMutex);
+  
+  // variables for motor control
+  Acquire(motorMutex);
+  for (int n=0; n<3; n++)
+  {
+    byte port = motor_port[n];
+    ResetRotationCount(port);
+    motor_target[n] = 0;
+    motor_control_activated[n] = false;
+    motor_prev_err[n] = 0;
+    motor_position[n] = MotorRotationCount(port);
+  }
+  Release(motorMutex);
 }
 
 task main()
 {
-  Precedes(button_handler, button_event_handler);
-  init_button_event_communication();
+  Precedes(motor_controller, button_handler, button_event_handler); //, lcd_display_handler, motor_director);
+  init_inter_task_communication();
 }
 
